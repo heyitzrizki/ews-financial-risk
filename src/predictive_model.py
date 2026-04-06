@@ -73,6 +73,7 @@ N_SPLITS = _env_int("EWS_PRED_N_SPLITS", 5)
 THRESHOLD_FLOOR = _env_float("EWS_PRED_THRESHOLD_FLOOR", 0.05)
 VAL_FRAC = _env_float("EWS_PRED_VAL_FRAC", 0.20)
 HORIZONS = _env_int_list("EWS_PRED_HORIZONS", [40, 60])
+CRISIS_TOP_N = max(_env_int("EWS_PRED_CRISIS_TOP_N", 2), 1)
 
 ENABLE_DL = os.getenv("EWS_PRED_ENABLE_DL", "1") == "1"
 DL_EPOCHS = _env_int("EWS_PRED_DL_EPOCHS", 25)
@@ -82,6 +83,18 @@ DL_LR = _env_float("EWS_PRED_DL_LR", 1e-3)
 
 ML_CANDIDATES = ["XGBoost", "RF", "Logit"]
 DL_CANDIDATES = ["ALSTM", "CausalTCN"]
+
+
+def _state_set_to_str(states: set[int]) -> str:
+    return ",".join(str(int(s)) for s in sorted(states))
+
+
+def select_crisis_states(df_slice: pd.DataFrame, top_n: int) -> set[int]:
+    tci_by_state = df_slice.groupby("hmm_state")["TCI"].mean().sort_values(ascending=False)
+    if tci_by_state.empty:
+        return set()
+    selected = tci_by_state.index[: min(top_n, len(tci_by_state))]
+    return {int(state) for state in selected}
 
 
 class AttentionLSTMClassifier(nn.Module):
@@ -361,10 +374,11 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
     prediction_rows = []
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X_raw), start=1):
-        tci_train = df.iloc[tr_idx].groupby("hmm_state")["TCI"].mean()
-        fold_crisis_state = int(tci_train.idxmax())
+        fold_crisis_states = select_crisis_states(df.iloc[tr_idx], CRISIS_TOP_N)
+        if not fold_crisis_states:
+            continue
 
-        raw_flag = (hmm_raw == fold_crisis_state).astype(float)
+        raw_flag = np.isin(hmm_raw, list(fold_crisis_states)).astype(float)
         y_all = _roll_forward_max(raw_flag, horizon)
         y_all[raw_flag == 1.0] = np.nan
 
@@ -430,7 +444,8 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                     "fold": fold,
                     "model": model_name,
                     "family": "ML",
-                    "crisis_state_fold": fold_crisis_state,
+                    "crisis_state_count": len(fold_crisis_states),
+                    "crisis_states_fold": _state_set_to_str(fold_crisis_states),
                     **metrics,
                 }
             )
@@ -448,6 +463,8 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                         "y_prob": float(prob_te[i]),
                         "y_pred": int(y_pred[i]),
                         "threshold": float(threshold),
+                        "crisis_state_count": len(fold_crisis_states),
+                        "crisis_states_fold": _state_set_to_str(fold_crisis_states),
                     }
                 )
 
@@ -478,7 +495,8 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                         "fold": fold,
                         "model": model_name,
                         "family": "DL",
-                        "crisis_state_fold": fold_crisis_state,
+                        "crisis_state_count": len(fold_crisis_states),
+                        "crisis_states_fold": _state_set_to_str(fold_crisis_states),
                         **metrics,
                     }
                 )
@@ -496,11 +514,13 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                             "y_prob": float(prob_te[i]),
                             "y_pred": int(y_pred[i]),
                             "threshold": float(threshold),
+                            "crisis_state_count": len(fold_crisis_states),
+                            "crisis_states_fold": _state_set_to_str(fold_crisis_states),
                         }
                     )
 
         print(
-            f"H={horizon:>2}d | Fold {fold}: train_seq={len(X_tr):>4}, test_seq={len(X_te):>4}, crisis_state={fold_crisis_state}"
+            f"H={horizon:>2}d | Fold {fold}: train_seq={len(X_tr):>4}, test_seq={len(X_te):>4}, crisis_states={sorted(fold_crisis_states)}"
         )
 
     fold_df = pd.DataFrame(fold_rows)
@@ -614,8 +634,11 @@ def build_latest_hybrid_signal(df: pd.DataFrame, selected_pair: dict) -> pd.Data
     hmm_raw = df["hmm_state"].to_numpy().astype(int)
     dates = df.index
 
-    global_crisis_state = int(df.groupby("hmm_state")["TCI"].mean().idxmax())
-    raw_flag = (hmm_raw == global_crisis_state).astype(float)
+    global_crisis_states = select_crisis_states(df, CRISIS_TOP_N)
+    if not global_crisis_states:
+        return pd.DataFrame()
+
+    raw_flag = np.isin(hmm_raw, list(global_crisis_states)).astype(float)
     y_all = _roll_forward_max(raw_flag, horizon)
     y_all[raw_flag == 1.0] = np.nan
 
@@ -651,7 +674,8 @@ def build_latest_hybrid_signal(df: pd.DataFrame, selected_pair: dict) -> pd.Data
             "y_prob": hybrid_prob,
             "y_pred": hybrid_pred,
             "threshold": threshold,
-            "global_crisis_state": global_crisis_state,
+            "crisis_state_count": len(global_crisis_states),
+            "crisis_states": _state_set_to_str(global_crisis_states),
         }
     )
     return signal_df
@@ -706,6 +730,7 @@ def main() -> None:
     print(
         f"Latest hybrid signal => date={pd.to_datetime(latest['Date']).date()} | "
         f"horizon={int(latest['horizon'])}d | "
+        f"crisis_states=[{latest['crisis_states']}] | "
         f"ML={latest['ml_model']} ({latest['ml_prob']:.4f}) | "
         f"DL={latest['dl_model']} ({latest['dl_prob']:.4f}) | "
         f"Hybrid={latest['y_prob']:.4f} | alert={int(latest['y_pred'])}"

@@ -343,6 +343,8 @@ def main() -> None:
     horizon = int(latest["horizon"])
     ml_model = str(latest.get("ml_model", "-"))
     dl_model = str(latest.get("dl_model", "-"))
+    crisis_state_count = int(latest.get("crisis_state_count", 1))
+    crisis_states = str(latest.get("crisis_states", str(latest.get("global_crisis_state", "-"))))
 
     status = alert_label(alert)
     level = risk_level(hybrid_prob)
@@ -363,6 +365,10 @@ def main() -> None:
     k2.metric("Risk Level", level)
     k3.metric("Data Date", latest_date.strftime("%Y-%m-%d"))
     k4.metric("Prediction Window", f"{horizon} days")
+
+    st.caption(
+        f"Crisis-event rule: top {crisis_state_count} regime(s) by connectedness level (states: {crisis_states})."
+    )
 
     m1, m2 = st.columns(2)
     with m1:
@@ -507,11 +513,12 @@ def main() -> None:
         records["Risk Probability (%)"] = (records["y_prob"] * 100).round(2)
         records["Date"] = records["Date"].dt.strftime("%Y-%m-%d")
 
-        view_cols = ["Date", "Status", "Risk Probability (%)", "horizon", "ml_model", "dl_model"]
+        view_cols = ["Date", "Status", "Risk Probability (%)", "horizon", "ml_model", "dl_model", "crisis_states"]
         rename = {
             "horizon": "Window (days)",
             "ml_model": "Top ML",
             "dl_model": "Top DL",
+            "crisis_states": "Crisis States",
         }
         st.dataframe(
             records[view_cols].rename(columns=rename, errors="ignore"),
