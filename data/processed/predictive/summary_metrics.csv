@@ -1,0 +1,4 @@
+horizon,model,PR_AUC_mean,PR_AUC_std,ROC_AUC_mean,F1_mean,Recall_mean,Precision_mean
+40,Logit,,,,0.0,0.0,0.0
+40,RF,,,,0.0,0.0,0.0
+40,XGBoost,,,,0.0,0.0,0.0
