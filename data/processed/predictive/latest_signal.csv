@@ -1,2 +1,2 @@
-Date,horizon,model,y_prob,y_pred,threshold,global_crisis_state
-2026-02-05,40,Logit,6.956928e-10,0,0.99,1
+Date,horizon,model,ml_model,dl_model,ml_prob,dl_prob,y_prob,y_pred,threshold,global_crisis_state
+2026-02-05,40,Hybrid,XGBoost,ALSTM,9.8637924e-05,0.0020056074,0.0010521227,0,0.52,1
