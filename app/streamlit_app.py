@@ -10,6 +10,7 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parents[1]
 PRED_DIR = BASE_DIR / "data" / "processed" / "predictive"
 TVP_PATH = BASE_DIR / "data" / "processed" / "tvp_var" / "tvp_var_spillover_indices.csv"
+MERGED_MARKET_PATH = BASE_DIR / "data" / "merged" / "market_close_2001_2026.csv"
 INFERENCE_PATH = BASE_DIR / "src" / "inference.py"
 
 
@@ -76,12 +77,161 @@ def build_transmitter_table(df_tvp: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
     return latest_table, top_three, latest_date
 
 
-def main() -> None:
-    st.set_page_config(page_title="EWS Risk Dashboard", layout="wide")
+def resolve_timeframe_range(choice: str, min_date: pd.Timestamp, max_date: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+    presets = {
+        "Full History": (min_date, max_date),
+        "Global Financial Crisis (2007-2009)": (pd.Timestamp("2007-01-01"), pd.Timestamp("2009-12-31")),
+        "Euro Debt Crisis (2010-2012)": (pd.Timestamp("2010-01-01"), pd.Timestamp("2012-12-31")),
+        "COVID-19 Shock (2020-2021)": (pd.Timestamp("2020-01-01"), pd.Timestamp("2021-12-31")),
+        "Rate Hike Shock (2022-2023)": (pd.Timestamp("2022-01-01"), pd.Timestamp("2023-12-31")),
+        "Last 1 Year": (max_date - pd.DateOffset(years=1), max_date),
+        "Last 3 Years": (max_date - pd.DateOffset(years=3), max_date),
+    }
+
+    start_date, end_date = presets.get(choice, (min_date, max_date))
+    start_date = max(start_date, min_date)
+    end_date = min(end_date, max_date)
+    return start_date, end_date
+
+
+def render_market_features_page() -> None:
+    st.title("Market Data Explorer")
+    st.caption("Explore historical market features from Yahoo Finance and inspect periods like COVID-19 or other crises.")
+
+    market_df = load_csv(MERGED_MARKET_PATH)
+    if market_df.empty:
+        st.warning("Merged Yahoo data was not found. Run the pipeline first.")
+        return
+
+    if "Date" not in market_df.columns:
+        st.error("Merged market file is missing the 'Date' column.")
+        return
+
+    market_df = market_df.copy()
+    market_df["Date"] = pd.to_datetime(market_df["Date"])
+    market_df = market_df.sort_values("Date")
+
+    feature_cols = [c for c in market_df.columns if c != "Date"]
+    if not feature_cols:
+        st.warning("No Yahoo feature columns found.")
+        return
+
+    min_date = market_df["Date"].min()
+    max_date = market_df["Date"].max()
+
+    c1, c2 = st.columns([1.2, 1.8])
+    with c1:
+        timeframe = st.selectbox(
+            "Timeframe",
+            [
+                "Full History",
+                "Global Financial Crisis (2007-2009)",
+                "Euro Debt Crisis (2010-2012)",
+                "COVID-19 Shock (2020-2021)",
+                "Rate Hike Shock (2022-2023)",
+                "Last 1 Year",
+                "Last 3 Years",
+                "Custom Range",
+            ],
+            index=0,
+            key="feature_timeframe",
+        )
+
+    if timeframe == "Custom Range":
+        with c2:
+            c_start, c_end = st.columns(2)
+            with c_start:
+                custom_start = st.date_input(
+                    "Start date",
+                    value=min_date.date(),
+                    min_value=min_date.date(),
+                    max_value=max_date.date(),
+                    key="feature_start_date",
+                )
+            with c_end:
+                custom_end = st.date_input(
+                    "End date",
+                    value=max_date.date(),
+                    min_value=min_date.date(),
+                    max_value=max_date.date(),
+                    key="feature_end_date",
+                )
+
+        start_date = pd.Timestamp(custom_start)
+        end_date = pd.Timestamp(custom_end)
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+    else:
+        start_date, end_date = resolve_timeframe_range(timeframe, min_date, max_date)
+
+    filtered = market_df[(market_df["Date"] >= start_date) & (market_df["Date"] <= end_date)].copy()
+    if filtered.empty:
+        st.warning("No data is available for the selected timeframe.")
+        return
+
+    selected_features = st.multiselect(
+        "Select features",
+        options=feature_cols,
+        default=feature_cols,
+        key="feature_selector",
+    )
+    if not selected_features:
+        st.info("Select at least one feature to display charts.")
+        return
+
+    normalize = st.checkbox("Normalize each feature to 0-1 scale", value=False, key="feature_normalize")
+
+    plot_df = filtered[["Date"] + selected_features].copy()
+    if normalize:
+        for col in selected_features:
+            col_min = plot_df[col].min()
+            col_max = plot_df[col].max()
+            if pd.notna(col_min) and pd.notna(col_max) and col_max > col_min:
+                plot_df[col] = (plot_df[col] - col_min) / (col_max - col_min)
+
+    long_df = plot_df.melt(id_vars="Date", var_name="Feature", value_name="Value")
+    long_df = long_df.dropna(subset=["Value"])
+
+    st.caption(
+        f"Showing {len(selected_features)} feature(s) from {plot_df['Date'].min().date()} to {plot_df['Date'].max().date()} "
+        f"({len(plot_df)} rows)."
+    )
+
+    faceted_chart = (
+        alt.Chart(long_df)
+        .mark_line()
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Value:Q", title="Value"),
+            tooltip=["Date:T", "Feature:N", alt.Tooltip("Value:Q", format=".4f")],
+        )
+        .properties(height=130)
+        .facet(row=alt.Row("Feature:N", title=None))
+        .resolve_scale(y="independent")
+    )
+    st.altair_chart(faceted_chart, use_container_width=True)
+
+    stats_df = filtered[selected_features].describe().T.reset_index().rename(columns={"index": "Feature"})
+    st.markdown("**Feature Summary Statistics**")
+    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+
+def render_ews_dashboard() -> None:
     st.title("Early Warning Dashboard for Market Stress")
     st.caption("Simple decision language: what is the current risk level, and which markets are sending pressure.")
 
+
+def main() -> None:
+    st.set_page_config(page_title="EWS Risk Dashboard", layout="wide")
+
     with st.sidebar:
+        page = st.radio(
+            "Page",
+            ["EWS Dashboard", "Market Data Explorer"],
+            index=0,
+        )
+
+        st.markdown("---")
         st.header("Actions")
         if st.button("Refresh Full Pipeline", use_container_width=True):
             with st.spinner("Updating data and signals..."):
@@ -100,6 +250,12 @@ def main() -> None:
 
         st.info("Tip: Refresh before meetings so the dashboard shows the latest signal.")
 
+    if page == "Market Data Explorer":
+        render_market_features_page()
+        return
+
+    render_ews_dashboard()
+
     latest_signal = load_csv(PRED_DIR / "latest_signal.csv")
     signal_history = load_csv(PRED_DIR / "latest_signal_history.csv")
     summary_metrics = load_csv(PRED_DIR / "summary_metrics.csv")
@@ -109,6 +265,76 @@ def main() -> None:
     if latest_signal.empty:
         st.warning("No signal file found yet. Click 'Refresh Full Pipeline' in the sidebar.")
         return
+
+    history_filtered = pd.DataFrame()
+    selected_timeframe = "Full History"
+    custom_start = None
+    custom_end = None
+    if not signal_history.empty:
+        signal_history = signal_history.copy()
+        signal_history["Date"] = pd.to_datetime(signal_history["Date"])
+        signal_history = signal_history.sort_values("Date")
+
+        min_hist_date = signal_history["Date"].min()
+        max_hist_date = signal_history["Date"].max()
+
+        st.subheader("Historical Signal Explorer")
+        tf_col1, tf_col2 = st.columns([1.2, 1])
+        with tf_col1:
+            selected_timeframe = st.selectbox(
+                "Select timeframe",
+                [
+                    "Full History",
+                    "Global Financial Crisis (2007-2009)",
+                    "Euro Debt Crisis (2010-2012)",
+                    "COVID-19 Shock (2020-2021)",
+                    "Rate Hike Shock (2022-2023)",
+                    "Last 1 Year",
+                    "Last 3 Years",
+                    "Custom Range",
+                ],
+                index=0,
+            )
+
+        if selected_timeframe == "Custom Range":
+            with tf_col2:
+                c_start, c_end = st.columns(2)
+                with c_start:
+                    custom_start = st.date_input(
+                        "Start date",
+                        value=min_hist_date.date(),
+                        min_value=min_hist_date.date(),
+                        max_value=max_hist_date.date(),
+                    )
+                with c_end:
+                    custom_end = st.date_input(
+                        "End date",
+                        value=max_hist_date.date(),
+                        min_value=min_hist_date.date(),
+                        max_value=max_hist_date.date(),
+                    )
+
+            start_date = pd.Timestamp(custom_start)
+            end_date = pd.Timestamp(custom_end)
+            if start_date > end_date:
+                start_date, end_date = end_date, start_date
+        else:
+            start_date, end_date = resolve_timeframe_range(selected_timeframe, min_hist_date, max_hist_date)
+
+        history_filtered = signal_history[
+            (signal_history["Date"] >= start_date) & (signal_history["Date"] <= end_date)
+        ].copy()
+
+        if history_filtered.empty:
+            st.warning("No records are available for the selected timeframe.")
+        else:
+            period_days = (history_filtered["Date"].max() - history_filtered["Date"].min()).days
+            alerts_count = int((history_filtered["y_pred"] == 1).sum())
+            all_count = int(len(history_filtered))
+            st.caption(
+                f"Showing {all_count} records from {history_filtered['Date'].min().date()} to {history_filtered['Date'].max().date()} "
+                f"({period_days} days), with {alerts_count} alert days."
+            )
 
     latest = latest_signal.iloc[-1]
     latest_date = pd.to_datetime(latest["Date"])
@@ -150,12 +376,10 @@ def main() -> None:
 
     with left:
         st.subheader("Risk Signal Trend")
-        if signal_history.empty:
+        if history_filtered.empty:
             st.info("No historical signal is available.")
         else:
-            hist = signal_history.copy()
-            hist["Date"] = pd.to_datetime(hist["Date"])
-            hist = hist.sort_values("Date").tail(300)
+            hist = history_filtered.sort_values("Date").copy()
             hist["Risk Level"] = hist["y_prob"].apply(risk_level)
 
             line = (
@@ -275,12 +499,10 @@ def main() -> None:
             st.altair_chart(bar, use_container_width=True)
 
     st.subheader("Latest Signal Records")
-    if signal_history.empty:
+    if history_filtered.empty:
         st.info("No signal history found.")
     else:
-        records = signal_history.copy()
-        records["Date"] = pd.to_datetime(records["Date"])
-        records = records.sort_values("Date", ascending=False).head(30)
+        records = history_filtered.copy().sort_values("Date", ascending=False)
         records["Status"] = records["y_pred"].map({1: "Alert", 0: "Stable"})
         records["Risk Probability (%)"] = (records["y_prob"] * 100).round(2)
         records["Date"] = records["Date"].dt.strftime("%Y-%m-%d")
