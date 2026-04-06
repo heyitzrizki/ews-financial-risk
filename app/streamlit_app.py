@@ -256,8 +256,12 @@ def main() -> None:
 
     render_ews_dashboard()
 
-    latest_signal = load_csv(PRED_DIR / "latest_signal.csv")
-    signal_history = load_csv(PRED_DIR / "latest_signal_history.csv")
+    latest_signal = load_csv(PRED_DIR / "live_forecast_latest.csv")
+    signal_history = load_csv(PRED_DIR / "backtest_signal_history.csv")
+    if latest_signal.empty:
+        latest_signal = load_csv(PRED_DIR / "latest_signal.csv")
+    if signal_history.empty:
+        signal_history = load_csv(PRED_DIR / "latest_signal_history.csv")
     summary_metrics = load_csv(PRED_DIR / "summary_metrics.csv")
     top_models = load_csv(PRED_DIR / "top_model_selection.csv")
     tvp_df = load_csv(TVP_PATH)
@@ -265,6 +269,8 @@ def main() -> None:
     if latest_signal.empty:
         st.warning("No signal file found yet. Click 'Refresh Full Pipeline' in the sidebar.")
         return
+
+    st.caption("Top summary uses LIVE forecast (latest available date). Historical explorer uses BACKTEST-verified records.")
 
     history_filtered = pd.DataFrame()
     selected_timeframe = "Full History"
@@ -278,7 +284,7 @@ def main() -> None:
         min_hist_date = signal_history["Date"].min()
         max_hist_date = signal_history["Date"].max()
 
-        st.subheader("Historical Signal Explorer")
+        st.subheader("Historical Signal Explorer (Backtest Verified)")
         tf_col1, tf_col2 = st.columns([1.2, 1])
         with tf_col1:
             selected_timeframe = st.selectbox(
@@ -504,7 +510,7 @@ def main() -> None:
             )
             st.altair_chart(bar, use_container_width=True)
 
-    st.subheader("Latest Signal Records")
+    st.subheader("Latest Signal Records (Backtest Verified)")
     if history_filtered.empty:
         st.info("No signal history found.")
     else:

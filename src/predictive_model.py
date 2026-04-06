@@ -681,6 +681,70 @@ def build_latest_hybrid_signal(df: pd.DataFrame, selected_pair: dict) -> pd.Data
     return signal_df
 
 
+def build_live_hybrid_forecast(df: pd.DataFrame, selected_pair: dict) -> pd.DataFrame:
+    horizon = int(selected_pair["horizon"])
+    ml_model = str(selected_pair["ml_model"])
+    dl_model = str(selected_pair["dl_model"])
+
+    feature_cols = [col for col in df.columns if col != "hmm_state"]
+    X_raw = df[feature_cols].to_numpy()
+    hmm_raw = df["hmm_state"].to_numpy().astype(int)
+    dates = df.index
+
+    crisis_states = select_crisis_states(df, CRISIS_TOP_N)
+    if not crisis_states:
+        return pd.DataFrame()
+
+    raw_flag = np.isin(hmm_raw, list(crisis_states)).astype(float)
+    y_all = _roll_forward_max(raw_flag, horizon)
+    y_all[raw_flag == 1.0] = np.nan
+
+    scaler = MinMaxScaler()
+    scaler.fit(X_raw)
+    X_scaled = scaler.transform(X_raw)
+
+    X_seq_all, _, seq_end_idx_all = make_sequences(X_scaled, np.zeros(len(X_scaled)), LOOKBACK)
+
+    X_seq_train_full, y_seq_train_full, seq_end_idx_train_full = make_sequences(X_scaled, y_all, LOOKBACK)
+    valid_mask = ~np.isnan(y_seq_train_full)
+    X_seq_train = X_seq_train_full[valid_mask]
+    y_seq_train = y_seq_train_full[valid_mask].astype(int)
+    seq_end_idx_train = seq_end_idx_train_full[valid_mask]
+
+    if len(X_seq_train) < 50 or len(np.unique(y_seq_train)) < 2:
+        return pd.DataFrame()
+
+    class_ratio = max((y_seq_train == 0).sum() / max((y_seq_train == 1).sum(), 1), 1.0)
+    ml_prob = fit_predict_ml(ml_model, class_ratio, X_seq_train, y_seq_train, X_seq_all)
+    dl_prob = fit_predict_dl(dl_model, class_ratio, X_seq_train, y_seq_train, X_seq_all)
+
+    hybrid_prob = 0.5 * ml_prob + 0.5 * dl_prob
+    pos_by_end_idx = {int(end_idx): i for i, end_idx in enumerate(seq_end_idx_all)}
+    train_pos = [pos_by_end_idx[int(end_idx)] for end_idx in seq_end_idx_train if int(end_idx) in pos_by_end_idx]
+    hybrid_prob_train = hybrid_prob[train_pos]
+    threshold = max(find_optimal_threshold(y_seq_train, hybrid_prob_train), THRESHOLD_FLOOR)
+    hybrid_pred = (hybrid_prob >= threshold).astype(int)
+
+    live_df = pd.DataFrame(
+        {
+            "Date": dates[seq_end_idx_all].values,
+            "horizon": horizon,
+            "model": "Hybrid",
+            "ml_model": ml_model,
+            "dl_model": dl_model,
+            "ml_prob": ml_prob,
+            "dl_prob": dl_prob,
+            "y_prob": hybrid_prob,
+            "y_pred": hybrid_pred,
+            "threshold": threshold,
+            "crisis_state_count": len(crisis_states),
+            "crisis_states": _state_set_to_str(crisis_states),
+            "signal_mode": "live_forecast",
+        }
+    )
+    return live_df
+
+
 def main() -> None:
     print(f"Loading TVP spillover data: {TVP_PATH}")
     print(f"Loading HMM regimes data : {HMM_PATH}")
@@ -719,16 +783,27 @@ def main() -> None:
     summary_metrics.to_csv(OUTPUT_DIR / "summary_metrics.csv", index=False)
     top_models_df.to_csv(OUTPUT_DIR / "top_model_selection.csv", index=False)
 
-    signal_df = build_latest_hybrid_signal(df, selected_pair)
-    if signal_df.empty:
+    backtest_signal_df = build_latest_hybrid_signal(df, selected_pair)
+    if backtest_signal_df.empty:
         raise RuntimeError("Hybrid signal generation failed due to insufficient usable sequence samples.")
 
-    signal_df.to_csv(OUTPUT_DIR / "latest_signal_history.csv", index=False)
-    signal_df.tail(1).to_csv(OUTPUT_DIR / "latest_signal.csv", index=False)
+    live_forecast_df = build_live_hybrid_forecast(df, selected_pair)
+    if live_forecast_df.empty:
+        raise RuntimeError("Live forecast generation failed due to insufficient usable sequence samples.")
 
-    latest = signal_df.iloc[-1]
+    backtest_signal_df["signal_mode"] = "backtest_verified"
+    backtest_signal_df.to_csv(OUTPUT_DIR / "backtest_signal_history.csv", index=False)
+    backtest_signal_df.tail(1).to_csv(OUTPUT_DIR / "backtest_latest_signal.csv", index=False)
+
+    live_forecast_df.to_csv(OUTPUT_DIR / "live_forecast_history.csv", index=False)
+    live_forecast_df.tail(1).to_csv(OUTPUT_DIR / "live_forecast_latest.csv", index=False)
+
+    backtest_signal_df.to_csv(OUTPUT_DIR / "latest_signal_history.csv", index=False)
+    live_forecast_df.tail(1).to_csv(OUTPUT_DIR / "latest_signal.csv", index=False)
+
+    latest = live_forecast_df.iloc[-1]
     print(
-        f"Latest hybrid signal => date={pd.to_datetime(latest['Date']).date()} | "
+        f"Latest live forecast => date={pd.to_datetime(latest['Date']).date()} | "
         f"horizon={int(latest['horizon'])}d | "
         f"crisis_states=[{latest['crisis_states']}] | "
         f"ML={latest['ml_model']} ({latest['ml_prob']:.4f}) | "
@@ -741,6 +816,10 @@ def main() -> None:
     print(f"- {OUTPUT_DIR / 'oof_predictions.csv'}")
     print(f"- {OUTPUT_DIR / 'summary_metrics.csv'}")
     print(f"- {OUTPUT_DIR / 'top_model_selection.csv'}")
+    print(f"- {OUTPUT_DIR / 'backtest_signal_history.csv'}")
+    print(f"- {OUTPUT_DIR / 'backtest_latest_signal.csv'}")
+    print(f"- {OUTPUT_DIR / 'live_forecast_history.csv'}")
+    print(f"- {OUTPUT_DIR / 'live_forecast_latest.csv'}")
     print(f"- {OUTPUT_DIR / 'latest_signal_history.csv'}")
     print(f"- {OUTPUT_DIR / 'latest_signal.csv'}")
 
