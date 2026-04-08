@@ -1,2 +1,2 @@
 Date,horizon,model,ml_model,dl_model,ml_prob,dl_prob,y_prob,y_pred,threshold,crisis_state_count,crisis_states,signal_mode
-2025-11-19,60,Hybrid,Logit,ALSTM,0.9139064,0.94143367,0.92767,1,0.59,2,"1,2",backtest_verified
+2026-01-08,60,Hybrid,XGBoost,ALSTM,9.227777e-05,0.0010555886,0.0005739332,0,0.11,2,"2,4",backtest_verified
