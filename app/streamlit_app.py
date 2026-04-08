@@ -10,6 +10,8 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parents[1]
 PRED_DIR = BASE_DIR / "data" / "processed" / "predictive"
 TVP_PATH = BASE_DIR / "data" / "processed" / "tvp_var" / "tvp_var_spillover_indices.csv"
+HMM_REGIME_PATH = BASE_DIR / "data" / "processed" / "regime" / "hmm_regimes.csv"
+HMM_TRANSITION_PATH = BASE_DIR / "data" / "processed" / "regime" / "transition_matrix.csv"
 MERGED_MARKET_PATH = BASE_DIR / "data" / "merged" / "market_close_2001_2026.csv"
 INFERENCE_PATH = BASE_DIR / "src" / "inference.py"
 
@@ -92,6 +94,80 @@ def resolve_timeframe_range(choice: str, min_date: pd.Timestamp, max_date: pd.Ti
     start_date = max(start_date, min_date)
     end_date = min(end_date, max_date)
     return start_date, end_date
+
+
+def _parse_state_label(label) -> int:
+    text = str(label).strip()
+    if text.lower().startswith("state"):
+        text = text.split()[-1]
+    return int(float(text))
+
+
+def build_regime_forecast(hmm_df: pd.DataFrame, transition_df: pd.DataFrame, tvp_df: pd.DataFrame, latest_date: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
+    regime = hmm_df.copy()
+    regime["Date"] = pd.to_datetime(regime["Date"])
+    regime = regime.sort_values("Date")
+
+    tvp = tvp_df.copy()
+    tvp["Date"] = pd.to_datetime(tvp["Date"])
+
+    joint = tvp[["Date", "TCI"]].merge(regime[["Date", "hmm_state"]], on="Date", how="inner")
+    if joint.empty:
+        return pd.DataFrame(), {}
+
+    tci_by_state = joint.groupby("hmm_state")["TCI"].mean().sort_values(ascending=False)
+    state_order = list(tci_by_state.index.astype(int))
+    severity_rank = {state: rank + 1 for rank, state in enumerate(state_order)}
+
+    trans = transition_df.copy()
+    if trans.columns[0].startswith("Unnamed"):
+        trans = trans.rename(columns={trans.columns[0]: "row_state"})
+    else:
+        trans = trans.rename(columns={trans.columns[0]: "row_state"})
+
+    trans["row_state"] = trans["row_state"].apply(_parse_state_label)
+    col_map = {col: _parse_state_label(col) for col in trans.columns if col != "row_state"}
+    trans = trans.rename(columns=col_map)
+    trans = trans.set_index("row_state").sort_index(axis=0).sort_index(axis=1)
+
+    states = sorted(set(trans.index.tolist()) | set(trans.columns.tolist()) | set(state_order))
+    trans = trans.reindex(index=states, columns=states, fill_value=0.0)
+
+    row_sums = trans.sum(axis=1).replace(0, 1.0)
+    trans = trans.div(row_sums, axis=0)
+    P = trans.to_numpy(dtype=float)
+
+    current_row = regime[regime["Date"] <= latest_date]
+    if current_row.empty:
+        return pd.DataFrame(), {}
+    current_state = int(current_row.iloc[-1]["hmm_state"])
+    if current_state not in states:
+        return pd.DataFrame(), {}
+
+    idx_map = {s: i for i, s in enumerate(states)}
+    current_vec = np.zeros(len(states))
+    current_vec[idx_map[current_state]] = 1.0
+
+    p40 = current_vec @ np.linalg.matrix_power(P, 40)
+    p60 = current_vec @ np.linalg.matrix_power(P, 60)
+
+    table = pd.DataFrame(
+        {
+            "State": states,
+            "Avg TCI": [float(tci_by_state.get(s, np.nan)) for s in states],
+            "Severity Rank": [severity_rank.get(s, len(states) + 1) for s in states],
+            "Current State": ["Yes" if s == current_state else "No" for s in states],
+            "Prob t+40": p40,
+            "Prob t+60": p60,
+        }
+    ).sort_values("Severity Rank")
+
+    meta = {
+        "current_state": current_state,
+        "top40": int(states[int(np.argmax(p40))]),
+        "top60": int(states[int(np.argmax(p60))]),
+    }
+    return table, meta
 
 
 def render_market_features_page() -> None:
@@ -265,6 +341,8 @@ def main() -> None:
     summary_metrics = load_csv(PRED_DIR / "summary_metrics.csv")
     top_models = load_csv(PRED_DIR / "top_model_selection.csv")
     tvp_df = load_csv(TVP_PATH)
+    hmm_df = load_csv(HMM_REGIME_PATH)
+    transition_df = load_csv(HMM_TRANSITION_PATH)
 
     if latest_signal.empty:
         st.warning("No signal file found yet. Click 'Refresh Full Pipeline' in the sidebar.")
@@ -375,6 +453,48 @@ def main() -> None:
     st.caption(
         f"Crisis-event rule: top {crisis_state_count} regime(s) by connectedness level (states: {crisis_states})."
     )
+
+    st.subheader("Regime Forecast (Multi-State, Horizon-Based)")
+    if hmm_df.empty or transition_df.empty or tvp_df.empty:
+        st.info("Regime forecast requires `hmm_regimes.csv`, `transition_matrix.csv`, and TVP spillover data.")
+    else:
+        regime_table, regime_meta = build_regime_forecast(hmm_df, transition_df, tvp_df, latest_date)
+        if regime_table.empty:
+            st.info("Regime forecast is unavailable for the current data snapshot.")
+        else:
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Current Regime", f"State {regime_meta['current_state']}")
+            r2.metric("Most Likely Regime (t+40)", f"State {regime_meta['top40']}")
+            r3.metric("Most Likely Regime (t+60)", f"State {regime_meta['top60']}")
+
+            regime_show = regime_table.copy()
+            regime_show["Prob t+40"] = (regime_show["Prob t+40"] * 100).round(2)
+            regime_show["Prob t+60"] = (regime_show["Prob t+60"] * 100).round(2)
+            regime_show["Avg TCI"] = regime_show["Avg TCI"].round(2)
+
+            st.dataframe(
+                regime_show[["State", "Severity Rank", "Current State", "Avg TCI", "Prob t+40", "Prob t+60"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            reg_long = regime_table[["State", "Prob t+40", "Prob t+60"]].melt(
+                id_vars="State", var_name="Horizon", value_name="Probability"
+            )
+            reg_long["State"] = reg_long["State"].astype(str)
+            reg_chart = (
+                alt.Chart(reg_long)
+                .mark_bar()
+                .encode(
+                    x=alt.X("State:N", title="Regime State"),
+                    y=alt.Y("Probability:Q", title="Probability", axis=alt.Axis(format="%")),
+                    color="Horizon:N",
+                    tooltip=["State:N", "Horizon:N", alt.Tooltip("Probability:Q", format=".2%")],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(reg_chart, use_container_width=True)
+            st.caption("This panel is a true forward projection of regime probabilities for t+40 and t+60 steps.")
 
     m1, m2 = st.columns(2)
     with m1:
