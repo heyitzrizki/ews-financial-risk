@@ -104,6 +104,46 @@ def _parse_state_label(label) -> int:
     return int(float(text))
 
 
+def _friendly_state_label(rank: int) -> str:
+    if rank <= 1:
+        return "Extreme Stress"
+    if rank == 2:
+        return "High Stress"
+    if rank == 3:
+        return "Elevated Risk"
+    if rank == 4:
+        return "Watchful"
+    return "Calm / Normal"
+
+
+def _friendly_state_meaning(rank: int) -> str:
+    if rank <= 1:
+        return "Market pressure is very broad and strong across assets."
+    if rank == 2:
+        return "Stress is high and can spread quickly if a new shock appears."
+    if rank == 3:
+        return "Pressure is visible, but not yet at crisis intensity."
+    if rank == 4:
+        return "Mostly stable, but some early pressure signals exist."
+    return "Conditions are generally stable with low systemic pressure."
+
+
+def build_state_interpretation_table(regime_table: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    sorted_table = regime_table.sort_values("Severity Rank").copy()
+    for _, row in sorted_table.iterrows():
+        rank = int(row["Severity Rank"])
+        state = int(row["State"])
+        rows.append(
+            {
+                "State": state,
+                "Severity Rank": rank,
+                "User-Friendly Meaning": f"{_friendly_state_label(rank)} — {_friendly_state_meaning(rank)}",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_regime_forecast(hmm_df: pd.DataFrame, transition_df: pd.DataFrame, tvp_df: pd.DataFrame, latest_date: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
     regime = hmm_df.copy()
     regime["Date"] = pd.to_datetime(regime["Date"])
@@ -454,6 +494,13 @@ def main() -> None:
     st.caption(
         f"Crisis-event rule: top {crisis_state_count} regime(s) by connectedness level (states: {crisis_states})."
     )
+    if not signal_history.empty:
+        backtest_last_date = signal_history["Date"].max()
+        st.info(
+            "Live forecast and backtest verified dates are different by design. "
+            f"Live forecast uses data up to {latest_date.strftime('%Y-%m-%d')}, while backtest verified history currently ends at "
+            f"{backtest_last_date.strftime('%Y-%m-%d')} because it needs known future outcomes before evaluation."
+        )
 
     st.subheader("Regime Forecast (Multi-State, Horizon-Based)")
     if hmm_df.empty or transition_df.empty or tvp_df.empty:
@@ -463,6 +510,10 @@ def main() -> None:
         if regime_table.empty:
             st.info("Regime forecast is unavailable for the current data snapshot.")
         else:
+            detected_states = regime_table["State"].nunique()
+            st.caption(
+                f"Detected regimes in the current HMM snapshot: {detected_states} state(s) ({', '.join([f'State {int(s)}' for s in regime_table['State'].tolist()])})."
+            )
             r1, r2, r3 = st.columns(3)
             r1.metric("Current Regime", f"State {regime_meta['current_state']}")
             r2.metric("Most Likely Regime (t+40)", f"State {regime_meta['top40']}")
@@ -472,9 +523,21 @@ def main() -> None:
             regime_show["Prob t+40"] = (regime_show["Prob t+40"] * 100).round(2)
             regime_show["Prob t+60"] = (regime_show["Prob t+60"] * 100).round(2)
             regime_show["Avg TCI"] = regime_show["Avg TCI"].round(2)
+            meaning_df = build_state_interpretation_table(regime_table)
+            regime_show = regime_show.merge(meaning_df, on=["State", "Severity Rank"], how="left")
 
             st.dataframe(
-                regime_show[["State", "Severity Rank", "Current State", "Avg TCI", "Prob t+40", "Prob t+60"]],
+                regime_show[
+                    [
+                        "State",
+                        "Severity Rank",
+                        "User-Friendly Meaning",
+                        "Current State",
+                        "Avg TCI",
+                        "Prob t+40",
+                        "Prob t+60",
+                    ]
+                ],
                 use_container_width=True,
                 hide_index=True,
             )
