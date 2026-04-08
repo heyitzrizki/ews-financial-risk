@@ -61,6 +61,7 @@ WEIGHT_DECAY = 1e-3
 ES_PATIENCE = _env_int("EWS_ES_PATIENCE", 20)
 
 K_RANGE = _env_int_list("EWS_K_RANGE", [2, 3, 4, 5, 6, 7, 8])
+FIXED_HMM_STATES = _env_int("EWS_FIXED_HMM_STATES", 5)
 MIN_SPELL = 30
 
 
@@ -316,6 +317,16 @@ def check_persistence(model: GaussianHMM, embeddings: np.ndarray, min_spell: int
 def select_hmm_model(latent_embeddings: np.ndarray):
     bic_scores = {}
     hmm_models = {}
+
+    if FIXED_HMM_STATES > 0:
+        bic, loglik, hmm_model = compute_hmm_bic(latent_embeddings, FIXED_HMM_STATES)
+        bic_scores[FIXED_HMM_STATES] = bic
+        hmm_models[FIXED_HMM_STATES] = hmm_model
+        print(
+            f"Fixed mode enabled: using K={FIXED_HMM_STATES} "
+            f"(LogLik={loglik:.2f}, BIC={bic:.2f})"
+        )
+        return FIXED_HMM_STATES, hmm_model, bic_scores
 
     print(f"{'K':>4}  {'LogLik':>12}  {'BIC':>12}")
     print("-" * 34)

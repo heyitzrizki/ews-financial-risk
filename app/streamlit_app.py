@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import subprocess
 import sys
 
@@ -15,6 +16,7 @@ HMM_REGIME_PATH = BASE_DIR / "data" / "processed" / "regime" / "hmm_regimes.csv"
 HMM_TRANSITION_PATH = BASE_DIR / "data" / "processed" / "regime" / "transition_matrix.csv"
 MERGED_MARKET_PATH = BASE_DIR / "data" / "merged" / "market_close_2001_2026.csv"
 INFERENCE_PATH = BASE_DIR / "src" / "inference.py"
+EXPECTED_HMM_STATES = int(os.getenv("EWS_FIXED_HMM_STATES", "5"))
 
 
 def risk_level(prob: float) -> str:
@@ -110,22 +112,22 @@ def _friendly_state_label(rank: int) -> str:
     if rank == 2:
         return "High Stress"
     if rank == 3:
-        return "Elevated Risk"
+        return "Rising Stress"
     if rank == 4:
-        return "Watchful"
-    return "Calm / Normal"
+        return "Mild Pressure"
+    return "Calm"
 
 
 def _friendly_state_meaning(rank: int) -> str:
     if rank <= 1:
-        return "Market pressure is very broad and strong across assets."
+        return "Most markets are under strong pressure at the same time."
     if rank == 2:
-        return "Stress is high and can spread quickly if a new shock appears."
+        return "Pressure is high and can spread quickly."
     if rank == 3:
-        return "Pressure is visible, but not yet at crisis intensity."
+        return "Pressure is visible and getting stronger."
     if rank == 4:
-        return "Mostly stable, but some early pressure signals exist."
-    return "Conditions are generally stable with low systemic pressure."
+        return "Mostly stable, with early warning signs."
+    return "Conditions are generally stable."
 
 
 def build_state_interpretation_table(regime_table: pd.DataFrame) -> pd.DataFrame:
@@ -335,7 +337,7 @@ def render_market_features_page() -> None:
 
 def render_ews_dashboard() -> None:
     st.title("Early Warning Dashboard for Market Stress")
-    st.caption("Simple decision language: what is the current risk level, and which markets are sending pressure.")
+    st.caption("Simple view: current risk, what it means, and where pressure is coming from.")
 
 
 def main() -> None:
@@ -389,7 +391,7 @@ def main() -> None:
         st.warning("No signal file found yet. Click 'Refresh Full Pipeline' in the sidebar.")
         return
 
-    st.caption("Top summary uses LIVE forecast (latest available date). Historical explorer uses BACKTEST-verified records.")
+    st.caption("Top cards show latest forecast. Historical table shows past records that are already verified.")
 
     history_filtered = pd.DataFrame()
     selected_timeframe = "Full History"
@@ -502,7 +504,7 @@ def main() -> None:
             f"{backtest_last_date.strftime('%Y-%m-%d')} because it needs known future outcomes before evaluation."
         )
 
-    st.subheader("Regime Forecast (Multi-State, Horizon-Based)")
+    st.subheader("Regime Outlook")
     if hmm_df.empty or transition_df.empty or tvp_df.empty:
         st.info("Regime forecast requires `hmm_regimes.csv`, `transition_matrix.csv`, and TVP spillover data.")
     else:
@@ -511,13 +513,17 @@ def main() -> None:
             st.info("Regime forecast is unavailable for the current data snapshot.")
         else:
             detected_states = regime_table["State"].nunique()
-            st.caption(
-                f"Detected regimes in the current HMM snapshot: {detected_states} state(s) ({', '.join([f'State {int(s)}' for s in regime_table['State'].tolist()])})."
-            )
+            state_names = ", ".join([f"State {int(s)}" for s in regime_table["State"].tolist()])
+            st.caption(f"Detected states in current run: {detected_states} ({state_names}).")
+            if detected_states < EXPECTED_HMM_STATES:
+                st.warning(
+                    f"This file currently has {detected_states} states, while dashboard expects {EXPECTED_HMM_STATES}. "
+                    "Please refresh full pipeline so HMM is rebuilt using 5 states."
+                )
             r1, r2, r3 = st.columns(3)
-            r1.metric("Current Regime", f"State {regime_meta['current_state']}")
-            r2.metric("Most Likely Regime (t+40)", f"State {regime_meta['top40']}")
-            r3.metric("Most Likely Regime (t+60)", f"State {regime_meta['top60']}")
+            r1.metric("Current State", f"State {regime_meta['current_state']}")
+            r2.metric("Most Likely in 40 Days", f"State {regime_meta['top40']}")
+            r3.metric("Most Likely in 60 Days", f"State {regime_meta['top60']}")
 
             regime_show = regime_table.copy()
             regime_show["Prob t+40"] = (regime_show["Prob t+40"] * 100).round(2)
@@ -541,6 +547,7 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+            st.caption("How to read this table: lower Severity Rank means more dangerous market condition.")
 
             reg_long = regime_table[["State", "Prob t+40", "Prob t+60"]].melt(
                 id_vars="State", var_name="Horizon", value_name="Probability"
@@ -558,7 +565,7 @@ def main() -> None:
                 .properties(height=220)
             )
             st.altair_chart(reg_chart, use_container_width=True)
-            st.caption("This panel is a true forward projection of regime probabilities for t+40 and t+60 steps.")
+            st.caption("This chart shows chances for each state over the next 40 and 60 days.")
 
     m1, m2 = st.columns(2)
     with m1:
