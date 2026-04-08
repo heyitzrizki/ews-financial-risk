@@ -1,2 +1,2 @@
-Date,horizon,model,ml_model,dl_model,ml_prob,dl_prob,y_prob,y_pred,threshold,crisis_state_count,crisis_states,signal_mode
-2026-01-08,60,Hybrid,XGBoost,ALSTM,9.227777e-05,0.0010555886,0.0005739332,0,0.11,2,"2,4",backtest_verified
+Date,horizon,model,ml_model,dl_model,ml_prob,dl_prob,y_prob,y_pred,threshold,crisis_state_count,crisis_states,crisis_tci_threshold,signal_mode
+2026-01-08,60,Hybrid,RF,ALSTM,0.8108093787929291,0.9220886,0.8664490009199021,1,0.53,2,"2,4",55.72385627496244,backtest_verified

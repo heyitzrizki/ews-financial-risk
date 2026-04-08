@@ -74,6 +74,10 @@ THRESHOLD_FLOOR = _env_float("EWS_PRED_THRESHOLD_FLOOR", 0.05)
 VAL_FRAC = _env_float("EWS_PRED_VAL_FRAC", 0.20)
 HORIZONS = _env_int_list("EWS_PRED_HORIZONS", [40, 60])
 CRISIS_TOP_N = max(_env_int("EWS_PRED_CRISIS_TOP_N", 2), 1)
+CRISIS_TCI_QUANTILE = _env_float(
+    "EWS_PRED_CRISIS_TCI_QUANTILE",
+    _env_float("EWS_PRED_CRISE_TCI_QUANTILE", 0.75),
+)
 
 ENABLE_DL = os.getenv("EWS_PRED_ENABLE_DL", "1") == "1"
 DL_EPOCHS = _env_int("EWS_PRED_DL_EPOCHS", 25)
@@ -89,8 +93,21 @@ def _state_set_to_str(states: set[int]) -> str:
     return ",".join(str(int(s)) for s in sorted(states))
 
 
-def select_crisis_states(df_slice: pd.DataFrame, top_n: int) -> set[int]:
-    tci_by_state = df_slice.groupby("hmm_state")["TCI"].mean().sort_values(ascending=False)
+def _clamp_quantile(value: float) -> float:
+    return float(min(max(value, 0.50), 0.99))
+
+
+def build_crisis_flag_from_tci(tci: np.ndarray, threshold: float) -> np.ndarray:
+    return (tci >= float(threshold)).astype(float)
+
+
+def select_crisis_states(df_slice: pd.DataFrame, top_n: int, quantile: float) -> set[int]:
+    q = _clamp_quantile(quantile)
+    tci_threshold = float(df_slice["TCI"].quantile(q))
+    high_tci = df_slice[df_slice["TCI"] >= tci_threshold]
+    source = high_tci if not high_tci.empty else df_slice
+
+    tci_by_state = source.groupby("hmm_state")["TCI"].mean().sort_values(ascending=False)
     if tci_by_state.empty:
         return set()
     selected = tci_by_state.index[: min(top_n, len(tci_by_state))]
@@ -374,11 +391,15 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
     prediction_rows = []
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X_raw), start=1):
-        fold_crisis_states = select_crisis_states(df.iloc[tr_idx], CRISIS_TOP_N)
+        tr_df = df.iloc[tr_idx]
+        q = _clamp_quantile(CRISIS_TCI_QUANTILE)
+        fold_tci_threshold = float(tr_df["TCI"].quantile(q))
+
+        fold_crisis_states = select_crisis_states(tr_df, CRISIS_TOP_N, q)
         if not fold_crisis_states:
             continue
 
-        raw_flag = np.isin(hmm_raw, list(fold_crisis_states)).astype(float)
+        raw_flag = build_crisis_flag_from_tci(df["TCI"].to_numpy(), fold_tci_threshold)
         y_all = _roll_forward_max(raw_flag, horizon)
         y_all[raw_flag == 1.0] = np.nan
 
@@ -446,6 +467,7 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                     "family": "ML",
                     "crisis_state_count": len(fold_crisis_states),
                     "crisis_states_fold": _state_set_to_str(fold_crisis_states),
+                    "crisis_tci_threshold": fold_tci_threshold,
                     **metrics,
                 }
             )
@@ -465,6 +487,7 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                         "threshold": float(threshold),
                         "crisis_state_count": len(fold_crisis_states),
                         "crisis_states_fold": _state_set_to_str(fold_crisis_states),
+                        "crisis_tci_threshold": fold_tci_threshold,
                     }
                 )
 
@@ -516,6 +539,7 @@ def run_horizon(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.DataFr
                             "threshold": float(threshold),
                             "crisis_state_count": len(fold_crisis_states),
                             "crisis_states_fold": _state_set_to_str(fold_crisis_states),
+                            "crisis_tci_threshold": fold_tci_threshold,
                         }
                     )
 
@@ -634,11 +658,13 @@ def build_latest_hybrid_signal(df: pd.DataFrame, selected_pair: dict) -> pd.Data
     hmm_raw = df["hmm_state"].to_numpy().astype(int)
     dates = df.index
 
-    global_crisis_states = select_crisis_states(df, CRISIS_TOP_N)
+    q = _clamp_quantile(CRISIS_TCI_QUANTILE)
+    global_tci_threshold = float(df["TCI"].quantile(q))
+    global_crisis_states = select_crisis_states(df, CRISIS_TOP_N, q)
     if not global_crisis_states:
         return pd.DataFrame()
 
-    raw_flag = np.isin(hmm_raw, list(global_crisis_states)).astype(float)
+    raw_flag = build_crisis_flag_from_tci(df["TCI"].to_numpy(), global_tci_threshold)
     y_all = _roll_forward_max(raw_flag, horizon)
     y_all[raw_flag == 1.0] = np.nan
 
@@ -676,6 +702,7 @@ def build_latest_hybrid_signal(df: pd.DataFrame, selected_pair: dict) -> pd.Data
             "threshold": threshold,
             "crisis_state_count": len(global_crisis_states),
             "crisis_states": _state_set_to_str(global_crisis_states),
+            "crisis_tci_threshold": global_tci_threshold,
         }
     )
     return signal_df
@@ -691,11 +718,13 @@ def build_live_hybrid_forecast(df: pd.DataFrame, selected_pair: dict) -> pd.Data
     hmm_raw = df["hmm_state"].to_numpy().astype(int)
     dates = df.index
 
-    crisis_states = select_crisis_states(df, CRISIS_TOP_N)
+    q = _clamp_quantile(CRISIS_TCI_QUANTILE)
+    global_tci_threshold = float(df["TCI"].quantile(q))
+    crisis_states = select_crisis_states(df, CRISIS_TOP_N, q)
     if not crisis_states:
         return pd.DataFrame()
 
-    raw_flag = np.isin(hmm_raw, list(crisis_states)).astype(float)
+    raw_flag = build_crisis_flag_from_tci(df["TCI"].to_numpy(), global_tci_threshold)
     y_all = _roll_forward_max(raw_flag, horizon)
     y_all[raw_flag == 1.0] = np.nan
 
@@ -739,6 +768,7 @@ def build_live_hybrid_forecast(df: pd.DataFrame, selected_pair: dict) -> pd.Data
             "threshold": threshold,
             "crisis_state_count": len(crisis_states),
             "crisis_states": _state_set_to_str(crisis_states),
+            "crisis_tci_threshold": global_tci_threshold,
             "signal_mode": "live_forecast",
         }
     )

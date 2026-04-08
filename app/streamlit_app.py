@@ -472,6 +472,7 @@ def main() -> None:
     dl_model = str(latest.get("dl_model", "-"))
     crisis_state_count = int(latest.get("crisis_state_count", 1))
     crisis_states = str(latest.get("crisis_states", str(latest.get("global_crisis_state", "-"))))
+    crisis_tci_threshold = float(latest.get("crisis_tci_threshold", np.nan)) if pd.notna(latest.get("crisis_tci_threshold", np.nan)) else np.nan
 
     status = alert_label(alert)
     level = risk_level(hybrid_prob)
@@ -493,9 +494,15 @@ def main() -> None:
     k3.metric("Data Date", latest_date.strftime("%Y-%m-%d"))
     k4.metric("Prediction Window", f"{horizon} days")
 
-    st.caption(
-        f"Crisis-event rule: top {crisis_state_count} regime(s) by connectedness level (states: {crisis_states})."
-    )
+    if pd.notna(crisis_tci_threshold):
+        st.caption(
+            f"Crisis-event rule: high connectedness days (TCI ≥ {crisis_tci_threshold:.2f}) are treated as crisis labels; "
+            f"dominant high-stress states: {crisis_states}."
+        )
+    else:
+        st.caption(
+            f"Crisis-event rule uses high connectedness days with dominant stress states: {crisis_states}."
+        )
     if not signal_history.empty:
         backtest_last_date = signal_history["Date"].max()
         st.info(
